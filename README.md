@@ -230,3 +230,197 @@ float estimateDistance(int rssi) {
 Given your background, this will be a great transition into embedded IoT programming. It’s a hands-on way to learn the ESP32’s capabilities and OLED rendering. Start with Arduino IDE, but consider PlatformIO once the codebase grows.
 
 Would you like me to generate a base PlatformIO project or Arduino sketch with both modes structured and ready to expand?
+
+
+
+------
+
+
+
+Great — let's dig into **Mode 1**: a sketch that monitors **hard-coded Wi-Fi SSIDs** and shows **RSSI signal strength** in both numeric and bar formats. This is ideal for signal strength mapping or testing coverage in a building, for example.
+
+---
+
+## ✅ **Goal:**
+
+* Hardcode one or more **SSIDs**.
+* Scan available networks.
+* If one of your target SSIDs is found:
+
+  * Display its **SSID**
+  * Show **RSSI (dBm)** value
+  * Display **signal strength as bar graph**
+  * Optionally estimate **distance**
+
+---
+
+## 🧱 **Project Requirements**
+
+### 🔧 Hardware:
+
+* ESP32 Dev Board with CH340 USB
+* Built-in 0.96” OLED display (I²C)
+* Micro-USB cable for flashing and power
+
+### 📦 Libraries (Arduino IDE):
+
+Install these via **Library Manager**:
+
+* `WiFi` (built into ESP32 core)
+* `Adafruit_GFX`
+* `Adafruit_SSD1306`
+
+### 🧰 Pins:
+
+* OLED I²C:
+
+  * `SDA` = GPIO 21
+  * `SCL` = GPIO 22
+
+---
+
+## 🧪 Example Sketch: Hardcoded SSID Monitoring
+
+```cpp
+#include <WiFi.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
+#define SCREEN_ADDRESS 0x3C
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// Hardcoded SSIDs to monitor
+const char* targetSSIDs[] = {"HomeWiFi", "OfficeAP", "LabNode"};
+const int numTargets = sizeof(targetSSIDs) / sizeof(targetSSIDs[0]);
+
+// Setup OLED
+void setupOLED() {
+  Wire.begin(21, 22); // GPIO21 = SDA, GPIO22 = SCL
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println("OLED init failed");
+    while (true);
+  }
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+}
+
+// Map RSSI to bar count (0–5 bars)
+int rssiToBars(int rssi) {
+  if (rssi >= -50) return 5;
+  else if (rssi >= -60) return 4;
+  else if (rssi >= -70) return 3;
+  else if (rssi >= -80) return 2;
+  else if (rssi >= -90) return 1;
+  else return 0;
+}
+
+// Estimate distance (approximate)
+float estimateDistance(int rssi) {
+  int txPower = -59; // Default TX power at 1m
+  return pow(10.0, ((float)(txPower - rssi)) / 20.0);
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true);
+  delay(100);
+
+  setupOLED();
+  display.setCursor(0, 0);
+  display.println("WiFi RSSI Monitor");
+  display.display();
+  delay(1000);
+}
+
+void loop() {
+  Serial.println("Scanning...");
+  int n = WiFi.scanNetworks(false, true); // passive scan, show hidden
+  display.clearDisplay();
+  display.setCursor(0, 0);
+
+  bool foundAny = false;
+
+  for (int i = 0; i < n; i++) {
+    String ssid = WiFi.SSID(i);
+    int rssi = WiFi.RSSI(i);
+
+    for (int j = 0; j < numTargets; j++) {
+      if (ssid == targetSSIDs[j]) {
+        foundAny = true;
+
+        int bars = rssiToBars(rssi);
+        float distance = estimateDistance(rssi);
+
+        display.printf("%s\n", ssid.c_str());
+        display.printf("%ddBm  %.1fm\n", rssi, distance);
+
+        // Draw bar graph (5 segments)
+        int barX = 0;
+        int barY = 48;
+        int barWidth = 10;
+        int barGap = 2;
+
+        for (int b = 0; b < 5; b++) {
+          int height = (b + 1) * 3;
+          int x = barX + b * (barWidth + barGap);
+          int y = barY - height;
+          if (b < bars) {
+            display.fillRect(x, y, barWidth, height, SSD1306_WHITE);
+          } else {
+            display.drawRect(x, y, barWidth, height, SSD1306_WHITE);
+          }
+        }
+
+        display.display();
+        break; // No need to keep checking this SSID
+      }
+    }
+  }
+
+  if (!foundAny) {
+    display.setCursor(0, 0);
+    display.println("No target SSIDs found");
+    display.display();
+  }
+
+  WiFi.scanDelete(); // clear memory
+  delay(5000); // wait before next scan
+}
+```
+
+---
+
+## 🧪 Example Output on OLED:
+
+```
+WiFi RSSI Monitor
+
+HomeWiFi
+-62dBm  3.1m
+
+ ▓         
+ ▓▓        
+ ▓▓▓       
+ ▓▓▓       
+ ▓▓▓       
+```
+
+---
+
+## 🔁 Next Steps / Improvements
+
+* Add button or serial input to switch between this mode and full scanner
+* Save RSSI data over time to SPIFFS or serial output
+* Use a rotary encoder to select SSIDs from a list
+* Automatically track RSSI drift over time
+
+---
+
+Would you like a **PlatformIO version** of this as well, or maybe a project structure with both modes selectable from a main menu on the OLED?
+
