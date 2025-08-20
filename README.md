@@ -1,6 +1,10 @@
 # ESP32-Wifi_build
 Used to see WiFi signal strength using the built in oled display
 
+question:
+i have a idea speak esp-32 dev board with intergratd .96 inch oled display, ch340 driver, wifi + ble mdule with mircro usb, its a esp32-wroom-32  ic2 oled sda d21/ gpio21 and scl  d22 / gpio22. how easy is it to upload firmware to it? can i do it over wifi? do i need special software? do i need a sd card in order to program it? i am familar with raspberry pi's and arduiino, and have a good knowledge of python and basic programming. i would like to delevelop a program that will allow me to select different modes of operation. one of the modes of operations will be a simple wifi status indicator, i would like to choose a static hard coded wifi signial or even muliple signals and have it report RSSI levels,   in a bar format and in some type of numeric vaule that i can test distnace and coverage. the second program would show me a list of all wifi signials around, and tell me the ssid name, signal strength, channel, rating (i.e, very strong, strong, ok, poor, very poor), if the ssid is password enbaled and what type of wifi signal is (i.e. wpa). how could i go about doing this?
+
+
 Great project idea! You're starting from a strong place given your background with Raspberry Pi, Arduino, and Python. The ESP32 Dev Board with integrated OLED is very flexible, and what you’re aiming to do is 100% doable with the ESP32.
 
 ---
