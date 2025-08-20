@@ -424,3 +424,87 @@ HomeWiFi
 
 Would you like a **PlatformIO version** of this as well, or maybe a project structure with both modes selectable from a main menu on the OLED?
 
+
+
+
+---------------------
+
+
+The **ESP32 Dev Board with built-in 0.96" OLED** (like the ones commonly sold on AliExpress, Amazon, etc.) **usually does *not* include a built-in button or switch** for user interaction, other than the **reset (EN)** and sometimes a **boot** button. Here's what is typically included:
+
+---
+
+## 🔘 **Standard Buttons on This Kind of ESP32 Dev Board**
+
+| Button         | Function                                               | Can You Use It in Code?                            |
+| -------------- | ------------------------------------------------------ | -------------------------------------------------- |
+| **EN / RESET** | Resets the board (hardware reset)                      | ❌ No                                               |
+| **BOOT / IO0** | Used for flashing firmware (hold while pressing reset) | ✅ Yes (GPIO 0) – usable as input when not flashing |
+
+---
+
+### ✅ **Can BOOT Button Be Used in Your Code?**
+
+Yes, **you *can* use the BOOT button (GPIO 0)** as a general-purpose input ***if you're not using it for flashing***. Just treat it as a regular button (with `digitalRead(0)`).
+
+But keep in mind:
+
+* Pressing BOOT while resetting puts the ESP32 into flash mode.
+* If you're not holding it during boot, you can use it as a button just fine.
+
+---
+
+## 🛠️ **Best Practice for Buttons**
+
+If you want **dedicated buttons** for switching modes, selecting SSIDs, or navigating menus:
+
+### 🔧 Add Your Own Tactile Buttons:
+
+* Connect buttons to unused GPIO pins (e.g. GPIO 12, 13, 14, 27, etc.).
+* Use internal pull-ups with a wiring like:
+
+```plaintext
+[3.3V]----[Button]----[GPIO Input]
+                      |
+                    [GND]
+```
+
+In code:
+
+```cpp
+pinMode(13, INPUT_PULLUP);  // Button on GPIO13
+if (digitalRead(13) == LOW) {
+  // Button is pressed
+}
+```
+
+---
+
+## 🧠 Recommended GPIO Pins for Buttons (Safe to Use)
+
+Avoid pins with special boot or flash functions unless you know what you're doing. These are generally **safe for input buttons**:
+
+| GPIO | Notes          |
+| ---- | -------------- |
+| 12   | Good for input |
+| 13   | Good for input |
+| 14   | Good for input |
+| 25   | Good for input |
+| 26   | Good for input |
+| 27   | Good for input |
+| 33   | Good for input |
+| 32   | Good for input |
+
+---
+
+## 💡 Summary
+
+* ✅ Your board probably has **EN (reset)** and **BOOT (GPIO 0)** buttons.
+* ✅ **BOOT can be used as an input button** when not flashing firmware.
+* ❌ It does **not have built-in switches** for user control (like menu selection).
+* ✅ You can easily add buttons to GPIOs for your mode-switching feature.
+
+---
+
+Would you like a code snippet that includes **mode switching using a button**?
+
