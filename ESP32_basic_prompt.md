@@ -1,0 +1,1 @@
+i have a idea speak esp-32 dev board with intergratd .96 inch oled display, ch340 driver, wifi + ble mdule with mircro usb, its a esp32-wroom-32  ic2 oled sda d21/ gpio21 and scl  d22 / gpio22. i am familar with raspberry pi's and arduiino, and have a good knowledge of python and basic programming. how can i achieve the following?:
