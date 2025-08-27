@@ -679,3 +679,286 @@ If you still see compile errors, double-check for:
 * Extra characters accidentally pasted into comments.
 
 Want me to add a **push mode** next (ESP32 wakes, posts JSON to your Pi, then sleeps immediately) to maximize battery life?
+
+
+*********************fixed_again*****************************
+
+$$$$$$$$$$$good fix!!!
+
+```cpp
+// put this on the first line of the .ino file:
+enum PatternType : uint8_t;
+
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include "DHT.h"
+#include <ESPmDNS.h>
+
+// ─────────────────────────────────────────────────────────────
+// 🛠️ EDIT THESE: easy knobs
+// ─────────────────────────────────────────────────────────────
+const char* WIFI_SSID = "wifiname";
+const char* WIFI_PASS = "wifipwd";
+const char* DEVICE_NAME = "esp32-shed";
+
+#define DHTPIN 4
+#define DHTTYPE DHT22
+
+#define LED_PIN 2
+#define LED_ACTIVE_LOW 0   // set 1 if your onboard LED is inverted
+
+// Deep sleep interval — in MINUTES
+const uint32_t SLEEP_INTERVAL_MINUTES = 1;
+
+// Keep the device awake (serving /metrics) this many seconds before sleep
+const uint32_t AWAKE_WINDOW_SECONDS   = 20;
+
+// Wi-Fi connect timeout (ms)
+const uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
+
+// HEARTBEAT when Wi-Fi CONNECTED: “2 blinks every 2 seconds”
+uint8_t  WIFI_HEARTBEAT_BLINKS      = 2;
+uint16_t WIFI_HEARTBEAT_ON_MS       = 100;
+uint16_t WIFI_HEARTBEAT_GAP_MS      = 120;    // gap between blinks in the pair
+uint16_t WIFI_HEARTBEAT_PERIOD_MS   = 2000;   // whole cycle length
+
+// NO-WIFI pattern: “6 short flashes every 5 seconds”
+uint8_t  NO_WIFI_FLASHES            = 6;
+uint16_t NO_WIFI_FLASH_ON_MS        = 80;
+uint16_t NO_WIFI_FLASH_OFF_MS       = 80;
+uint16_t NO_WIFI_CYCLE_PERIOD_MS    = 5000;
+
+// DATA BEAT while sampling: “solid ON for 2 seconds”
+uint16_t DATA_BEAT_MS               = 2000;
+// ─────────────────────────────────────────────────────────────
+
+DHT dht(DHTPIN, DHTTYPE);
+WebServer server(80);
+
+float lastT = NAN, lastH = NAN;
+String lastUptime;
+
+inline void ledWrite(bool on) {
+#if LED_ACTIVE_LOW
+  digitalWrite(LED_PIN, on ? LOW : HIGH);
+#else
+  digitalWrite(LED_PIN, on ? HIGH : LOW);
+#endif
+}
+
+String uptimeStamp(unsigned long nowMs) {
+  unsigned long totalSec = nowMs / 1000UL;
+  unsigned long ms       = nowMs % 1000UL;
+  unsigned long h        = totalSec / 3600UL;
+  unsigned long m        = (totalSec % 3600UL) / 60UL;
+  unsigned long s        = totalSec % 60UL;
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%02lu:%02lu:%02lu.%03lu", h, m, s, ms);
+  return String(buf);
+}
+
+// ── Patterns ────────────────────────────────────────────────
+// replace your current enum definition with this exact line:
+enum PatternType : uint8_t { PATTERN_NONE, PATTERN_WIFI, PATTERN_NO_WIFI, PATTERN_DATA_BEAT };
+
+
+struct LedPattern {
+  PatternType type = PATTERN_NONE;
+  unsigned long cycleStart = 0;     // start of repeating cycle
+  unsigned long dataBeatUntil = 0;  // deadline for DATA_BEAT
+  PatternType baseType = PATTERN_NONE; // where to return after DATA_BEAT
+} lp;
+
+void setPattern(PatternType t) {
+  lp.type = t;
+  lp.cycleStart = millis();
+  ledWrite(false);
+}
+
+void setDataBeat(uint16_t durationMs, PatternType returnTo) {
+  lp.type = PATTERN_DATA_BEAT;
+  lp.dataBeatUntil = millis() + durationMs;
+  lp.baseType = returnTo;
+  ledWrite(true); // solid on during data beat
+}
+
+// Compute whether LED should be ON for the current pattern
+void runLedPattern() {
+  unsigned long now = millis();
+
+  if (lp.type == PATTERN_DATA_BEAT) {
+    if (now >= lp.dataBeatUntil) {
+      setPattern(lp.baseType);
+    } else {
+      ledWrite(true);
+    }
+    return;
+  }
+
+  if (lp.type == PATTERN_WIFI) {
+    // N blinks packed at start of a cycle, then off until period end
+    unsigned long t = (now - lp.cycleStart) % WIFI_HEARTBEAT_PERIOD_MS;
+    unsigned long slot = WIFI_HEARTBEAT_ON_MS + WIFI_HEARTBEAT_GAP_MS;
+    unsigned long activeWindow = WIFI_HEARTBEAT_BLINKS * slot;
+    bool on = false;
+    if (t < activeWindow) {
+      unsigned long pos = t % slot;
+      on = (pos < WIFI_HEARTBEAT_ON_MS);
+    }
+    ledWrite(on);
+    return;
+  }
+
+  if (lp.type == PATTERN_NO_WIFI) {
+    unsigned long t = (now - lp.cycleStart) % NO_WIFI_CYCLE_PERIOD_MS;
+    unsigned long slot = NO_WIFI_FLASH_ON_MS + NO_WIFI_FLASH_OFF_MS;
+    unsigned long activeWindow = NO_WIFI_FLASHES * slot;
+    bool on = false;
+    if (t < activeWindow) {
+      unsigned long pos = t % slot;
+      on = (pos < NO_WIFI_FLASH_ON_MS);
+    }
+    ledWrite(on);
+    return;
+  }
+
+  ledWrite(false);
+}
+
+// ── Web server (/metrics) ───────────────────────────────────
+String jsonEscape(const String& s) {
+  String out; out.reserve(s.length()+4);
+  for (size_t i=0;i<s.length();++i){
+    char c=s[i];
+    if (c=='"'||c=='\\') { out+='\\'; out+=c; }
+    else if (c=='\n') out+="\\n";
+    else out+=c;
+  }
+  return out;
+}
+
+void handleMetrics() {
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Headers", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+
+  String body = "{";
+  body += "\"device\":\"" + jsonEscape(DEVICE_NAME) + "\",";
+  body += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+  body += "\"uptime\":\"" + lastUptime + "\",";
+  body += "\"rssi\":" + String(WiFi.isConnected() ? WiFi.RSSI() : 0) + ",";
+  if (isnan(lastT) || isnan(lastH)) {
+    body += "\"ok\":false";
+  } else {
+    body += "\"ok\":true,";
+    body += "\"temperature_c\":" + String(lastT, 2) + ",";
+    body += "\"temperature_f\":" + String(lastT * 9.0/5.0 + 32.0, 2) + ",";
+    body += "\"humidity_pct\":" + String(lastH, 2);
+  }
+  body += "}";
+  server.send(200, "application/json", body);
+}
+
+// ── Wi-Fi connect with patterns ─────────────────────────────
+void connectWiFiWithPatterns() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  unsigned long start = millis();
+
+  setPattern(PATTERN_NO_WIFI); // show “no wifi” pattern while trying
+
+  while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
+    server.handleClient();
+    runLedPattern();
+    delay(10);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    setPattern(PATTERN_WIFI);
+  } else {
+    setPattern(PATTERN_NO_WIFI);
+  }
+}
+
+void startServerMDNS() {
+  server.on("/metrics", HTTP_OPTIONS, [](){
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Headers", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+    server.send(204);
+  });
+  server.on("/metrics", HTTP_GET, handleMetrics);
+  server.onNotFound([](){ server.send(404, "text/plain", "Not found"); });
+  server.begin();
+
+  if (MDNS.begin(DEVICE_NAME)) {
+    MDNS.addService("http", "tcp", 80);
+  }
+}
+
+// ── One reading with data-beat ──────────────────────────────
+void takeReadingWithBeat() {
+  // choose which pattern we’ll return to after the beat
+  PatternType back = (WiFi.status() == WL_CONNECTED) ? PATTERN_WIFI : PATTERN_NO_WIFI;
+  setDataBeat(DATA_BEAT_MS, back);
+
+  // DHT read (~250ms)
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+
+  lastT = t;
+  lastH = h;
+  lastUptime = uptimeStamp(millis());
+
+  // keep LED solid for full beat duration while staying responsive
+  while (lp.type == PATTERN_DATA_BEAT) {
+    server.handleClient();
+    runLedPattern();
+    delay(5);
+  }
+}
+
+// ── Setup / Sleep ───────────────────────────────────────────
+void setup() {
+  pinMode(LED_PIN, OUTPUT);
+  ledWrite(false);
+
+  Serial.begin(115200);
+  delay(100);
+  Serial.println("\n=== ESP32 DHT22 (battery) — deep sleep node ===");
+
+  dht.begin();
+
+  connectWiFiWithPatterns();
+  startServerMDNS();
+
+  takeReadingWithBeat();  // one sample per wake
+
+  // Short awake window so the dashboard can fetch /metrics
+  unsigned long awakeStart = millis();
+  while (millis() - awakeStart < (AWAKE_WINDOW_SECONDS * 1000UL)) {
+    server.handleClient();
+    runLedPattern();
+    delay(5);
+  }
+
+  Serial.println("Going to deep sleep…");
+  ledWrite(false);
+
+  // Convert minutes → microseconds
+  uint64_t sleep_us = (uint64_t)SLEEP_INTERVAL_MINUTES * 60ULL * 1000000ULL;
+
+  if (WiFi.isConnected()) {
+    WiFi.disconnect(true, true);
+  }
+  WiFi.mode(WIFI_OFF);
+
+  esp_sleep_enable_timer_wakeup(sleep_us);
+  esp_deep_sleep_start();
+}
+
+void loop() {
+  // never reached
+}
+```
