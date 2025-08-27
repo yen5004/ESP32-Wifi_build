@@ -1,4 +1,4 @@
-
+esp32
 Excellent! Let’s add the blinking LED next.
 
 Most ESP32 DevKit boards include a small **onboard LED** tied to **GPIO 2** (sometimes labeled “IO2” or “LED”). We’ll write a sketch to blink it once per second.
