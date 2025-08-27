@@ -1,0 +1,400 @@
+Heck yes—let’s turn your ESP32+DHT22s into a tiny **home climate dashboard** you can load in any browser on your LAN. We’ll keep it simple, fast, and easy to grow.
+
+You’ll set up:
+
+1. **Each sensor** = ESP32 with a tiny web server that serves JSON at `/metrics`.
+2. **One dashboard web page** = fetches all sensors’ JSON and shows live tiles (auto-refresh).
+
+No databases, no MQTT (yet), no cloud—just LAN HTTP.
+
+---
+
+# Part A — Flash each ESP32 sensor
+
+## What it does
+
+* Connects to Wi-Fi
+* Reads DHT22 every 2s
+* Blips the LED on each read
+* Serves JSON on `http://<device-ip>/metrics`
+* (Optional) mDNS name like `http://esp32-living.local/metrics`
+
+> Give each sensor a unique `DEVICE_NAME` (e.g., `esp32-living`, `esp32-office`, etc.)
+
+## Sketch (Arduino)
+
+Install libraries once: **DHT sensor library** (Adafruit) + **Adafruit Unified Sensor**.
+
+```cpp
+#include <WiFi.h>
+#include <WebServer.h>
+#include "DHT.h"
+#include "esp_system.h"
+#ifdef ESP32
+  #include <ESPmDNS.h>
+#endif
+
+// ----------- EDIT THESE -----------
+const char* WIFI_SSID = "YOUR_WIFI_SSID";
+const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
+const char* DEVICE_NAME = "esp32-living"; // <- change per sensor
+// ----------------------------------
+
+#define DHTPIN 4
+#define DHTTYPE DHT22
+
+#define LED_PIN 2
+#define LED_ACTIVE_LOW 0
+
+DHT dht(DHTPIN, DHTTYPE);
+WebServer server(80);
+
+const unsigned long READ_PERIOD_MS = 2000;
+const unsigned long LED_PULSE_MS   = 100;
+
+unsigned long lastReadMs     = 0;
+unsigned long ledPulseStart  = 0;
+bool          ledPulsing     = false;
+
+float lastT = NAN, lastH = NAN;  // cache latest values
+
+inline void writeLed(bool on) {
+#if LED_ACTIVE_LOW
+  digitalWrite(LED_PIN, on ? LOW : HIGH);
+#else
+  digitalWrite(LED_PIN, on ? HIGH : LOW);
+#endif
+}
+
+String jsonEscape(const String& s) {
+  String out; out.reserve(s.length()+4);
+  for (size_t i=0;i<s.length();++i){
+    char c=s[i];
+    if(c=='"'||c=='\\') { out+='\\'; out+=c; }
+    else if (c=='\n') out+="\\n";
+    else out+=c;
+  }
+  return out;
+}
+
+String uptimeStamp(unsigned long nowMs) {
+  unsigned long totalSec = nowMs / 1000UL;
+  unsigned long ms       = nowMs % 1000UL;
+  unsigned long hours    = totalSec / 3600UL;
+  unsigned long minutes  = (totalSec % 3600UL) / 60UL;
+  unsigned long seconds  = totalSec % 60UL;
+
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%02lu:%02lu:%02lu.%03lu",
+           hours, minutes, seconds, ms);
+  return String(buf);
+}
+
+void handleMetrics() {
+  // CORS so a separate dashboard page can fetch this
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Headers", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+
+  // Build JSON
+  String name = DEVICE_NAME;
+  int rssi = WiFi.RSSI();
+  String ts = uptimeStamp(millis());
+
+  String body = "{";
+  body += "\"device\":\"" + jsonEscape(name) + "\",";
+  body += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+  body += "\"uptime\":\"" + ts + "\",";
+  body += "\"rssi\":" + String(rssi) + ",";
+  if (isnan(lastT) || isnan(lastH)) {
+    body += "\"ok\":false";
+  } else {
+    body += "\"ok\":true,";
+    body += "\"temperature_c\":" + String(lastT, 2) + ",";
+    body += "\"temperature_f\":" + String(lastT * 9.0/5.0 + 32.0, 2) + ",";
+    body += "\"humidity_pct\":" + String(lastH, 2);
+  }
+  body += "}";
+
+  server.send(200, "application/json", body);
+}
+
+void setup() {
+  pinMode(LED_PIN, OUTPUT);
+  writeLed(false);
+
+  Serial.begin(115200);
+  delay(300);
+  Serial.println("\n=== ESP32 DHT22 Sensor ===");
+  Serial.printf("Device: %s\n", DEVICE_NAME);
+  Serial.printf("Connecting to WiFi: %s\n", WIFI_SSID);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  // Simple connect loop
+  int tries = 0;
+  while (WiFi.status() != WL_CONNECTED && tries < 40) {
+    delay(250);
+    Serial.print(".");
+    tries++;
+  }
+  Serial.println();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("IP: "); Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("WiFi connect failed; continuing (AP not required for metrics on LAN).");
+  }
+
+#ifdef ESP32
+  if (MDNS.begin(DEVICE_NAME)) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.print("mDNS: http://");
+    Serial.print(DEVICE_NAME);
+    Serial.println(".local/");
+  } else {
+    Serial.println("mDNS start failed.");
+  }
+#endif
+
+  dht.begin();
+
+  server.on("/metrics", HTTP_OPTIONS, [](){ // CORS preflight
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Access-Control-Allow-Headers", "*");
+    server.sendHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+    server.send(204);
+  });
+  server.on("/metrics", HTTP_GET, handleMetrics);
+  server.onNotFound([](){ server.send(404, "text/plain", "Not found"); });
+
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+void loop() {
+  server.handleClient();
+
+  unsigned long now = millis();
+
+  // Read DHT every 2s
+  if (now - lastReadMs >= READ_PERIOD_MS) {
+    lastReadMs = now;
+
+    float h = dht.readHumidity();
+    float t = dht.readTemperature(); // °C
+
+    // Pulse LED regardless of success to show sampling instant
+    writeLed(true);
+    ledPulsing = true;
+    ledPulseStart = now;
+
+    if (!isnan(h) && !isnan(t)) {
+      lastH = h;
+      lastT = t;
+      Serial.printf("[%-12s] H=%.2f%%  T=%.2fC / %.2fF\n",
+                    uptimeStamp(now).c_str(), h, t, t*9.0/5.0+32.0);
+    } else {
+      Serial.printf("[%-12s] DHT read failed\n", uptimeStamp(now).c_str());
+    }
+  }
+
+  // end LED pulse after 100 ms
+  if (ledPulsing && (now - ledPulseStart >= LED_PULSE_MS)) {
+    writeLed(false);
+    ledPulsing = false;
+  }
+}
+```
+
+**Flash one board at a time**, changing only `DEVICE_NAME`. Optionally set DHCP reservations so their IPs stay fixed.
+
+**Test:** In a browser on the same network, open:
+
+* `http://<that-esp32-ip>/metrics`
+* or `http://esp32-living.local/metrics` (mDNS; works on most desktops)
+
+You should see JSON like:
+
+```json
+{
+  "device":"esp32-living",
+  "ip":"192.168.1.42",
+  "uptime":"00:03:14.127",
+  "rssi":-51,
+  "ok":true,
+  "temperature_c":24.31,
+  "temperature_f":75.76,
+  "humidity_pct":51.98
+}
+```
+
+---
+
+# Part B — Simple dashboard webpage
+
+## What it does
+
+* A single HTML file you can host on your Pi/webserver.
+* Lists all sensors you define.
+* Polls every 5 seconds and shows last values, status color, and RSSI.
+
+> Edit the `SENSORS` array with your sensor URLs (IP or `.local` names).
+
+### `dashboard.html`
+
+Save this as `dashboard.html` and serve it from your Pi (or any static server). (If you open it directly as a `file://` URL, some browsers block cross-origin requests; serving via HTTP avoids that. Your sensors already allow CORS.)
+
+```html
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Home Climate Dashboard</title>
+  <style>
+    body { background:#0b0b0b; color:#eaeaea; font-family:system-ui,Segoe UI,Roboto,Arial; margin:20px; }
+    h1 { font-weight:700; margin-bottom:12px; }
+    .grid { display:grid; gap:16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+    .card { background:#151515; border-radius:16px; padding:16px; box-shadow:0 2px 16px rgba(0,0,0,0.35); }
+    .name { font-size:1.1rem; margin:0 0 8px 0; }
+    .value { font-size:1.6rem; margin:4px 0; }
+    .muted { color:#9aa0a6; font-size:0.92rem; }
+    .row { display:flex; justify-content:space-between; gap:12px; }
+    .ok { color:#9cff9c; }
+    .warn { color:#ffd08a; }
+    .bad { color:#ff9c9c; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:0.8rem; background:#222; }
+    a { color:#8ab4f8; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <h1>Home Climate Dashboard</h1>
+  <div class="muted">Auto-refreshing every 5 seconds</div>
+  <div id="grid" class="grid"></div>
+
+<script>
+  // ----- EDIT: list your sensor metric endpoints -----
+  const SENSORS = [
+    { name: "Living Room", url: "http://esp32-living.local/metrics" },
+    { name: "Office",      url: "http://esp32-office.local/metrics" },
+    // Or use fixed IPs:
+    // { name: "Basement", url: "http://192.168.1.51/metrics" },
+  ];
+  // ---------------------------------------------------
+
+  const REFRESH_MS = 5000;
+
+  function fmt(v, digits=2) {
+    return (v === null || v === undefined || Number.isNaN(v)) ? "—" : Number(v).toFixed(digits);
+  }
+
+  function rssiQuality(rssi) {
+    if (rssi >= -60) return {cls:"ok",   text:`${rssi} dBm (strong)`};
+    if (rssi >= -70) return {cls:"warn", text:`${rssi} dBm (good)`};
+    if (rssi >= -80) return {cls:"warn", text:`${rssi} dBm (fair)`};
+    return {cls:"bad", text:`${rssi} dBm (weak)`};
+  }
+
+  async function fetchSensor(s) {
+    const t0 = performance.now();
+    try {
+      const r = await fetch(s.url, { cache: "no-store" });
+      const latency = Math.round(performance.now() - t0);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      return { ok: true, latency, data: j };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  }
+
+  function cardTemplate(idx, name) {
+    const id = `card-${idx}`;
+    return `
+      <div class="card" id="${id}">
+        <div class="row">
+          <h3 class="name">${name}</h3>
+          <span class="pill" id="${id}-status">loading…</span>
+        </div>
+        <div class="value" id="${id}-temp">— °F</div>
+        <div class="value" id="${id}-hum">— %</div>
+        <div class="muted" id="${id}-meta">—</div>
+        <div class="muted" id="${id}-ip">—</div>
+      </div>
+    `;
+  }
+
+  function ensureCards() {
+    const grid = document.getElementById("grid");
+    grid.innerHTML = SENSORS.map((s, i) => cardTemplate(i, s.name)).join("");
+  }
+
+  async function refreshOnce() {
+    const results = await Promise.all(SENSORS.map(fetchSensor));
+    results.forEach((res, i) => {
+      const id = `card-${i}`;
+      const el = (sel) => document.getElementById(`${id}-${sel}`);
+
+      if (!res.ok) {
+        el("status").textContent = "offline";
+        el("status").className = "pill bad";
+        el("temp").textContent = "— °F";
+        el("hum").textContent = "— %";
+        el("meta").textContent = res.error;
+        el("ip").textContent = "";
+        return;
+      }
+
+      const d = res.data;
+      const ok = !!d.ok;
+      el("status").textContent = ok ? "online" : "error";
+      el("status").className = "pill " + (ok ? "ok" : "bad");
+
+      const tempF = d.temperature_f;
+      const hum = d.humidity_pct;
+      el("temp").textContent = `${fmt(tempF)} °F`;
+      el("hum").textContent  = `${fmt(hum)} %`;
+
+      const rssiInfo = rssiQuality(d.rssi ?? -200);
+      el("meta").innerHTML =
+        `Device: <b>${d.device ?? "?"}</b> • Uptime: ${d.uptime ?? "?"} • RSSI: <span class="${rssiInfo.cls}">${rssiInfo.text}</span> • <span class="muted">${res.latency} ms</span>`;
+
+      el("ip").innerHTML =
+        d.ip ? `IP: <a href="http://${d.ip}/metrics" target="_blank">${d.ip}</a>` : "";
+    });
+  }
+
+  ensureCards();
+  refreshOnce();
+  setInterval(refreshOnce, REFRESH_MS);
+</script>
+</body>
+</html>
+```
+
+### How to host the dashboard
+
+* If you have a Raspberry Pi/webserver already, drop `dashboard.html` in its web root (e.g., `/var/www/html/` for Apache or `www/` for lighttpd).
+* Or run a quick ad-hoc server from your PC in that folder:
+
+  * **Windows/macOS/Linux:** open a terminal in the folder and run:
+
+    * Python 3: `python -m http.server 8080`
+    * Then open `http://<your-computer-ip>:8080/dashboard.html`
+* Make sure the browser device is on the same LAN as the ESP32s.
+
+> If `.local` names don’t resolve in your browser, use the ESP32s’ IPs (or add DHCP reservations and use those IPs in `SENSORS`).
+
+---
+
+## Optional next steps (later)
+
+* **MQTT + Node-RED or Home Assistant**: great for history, charts, alerts.
+* **InfluxDB + Grafana**: long-term storage & beautiful graphs.
+* **Auth**: add a simple token check on `/metrics` if you want basic protection on your LAN.
+* **Auto-discovery**: one central service can scan for `/_services._dns-sd._udp.local` and find your `http` mDNS services; easy to add when you’re ready.
+
+---
+
+If you want, tell me your preferred hosting box (Pi, Windows, etc.), and I’ll tailor the exact “drop this file here” steps. Or we can add **sparklines/trends** to the dashboard with a tiny bit of JS.
